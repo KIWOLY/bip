@@ -6,25 +6,34 @@
 #define LOCAL_ALTITUDE 35.0
 Adafruit_BME280 bme;
 
-bool packetSent, packetQueued;
-static uint8_t txBuffer[16];  // 16 bytes: 12 for BME280 + 4 for DO
-
+// Global variables
 RTC_DATA_ATTR int bootCount = 0;
+RTC_DATA_ATTR float savedR0 = 0;
+RTC_DATA_ATTR uint32_t lastBootTime = 0;
 esp_sleep_source_t wakeCause;
+static uint8_t txBuffer[28];
+bool packetSent = false, packetQueued = false;
 
-extern float temp_f, hum_f, pres_f;  // From bme280.ino
+extern float temp_f, hum_f, pres_f;
 extern uint32_t temperature, humidity, pressure;
-extern float doValue;  // From oxygen.ino
+extern float co2_ppm, nox_ppm, alcohol_ppm, benzene_ppm;
+extern uint32_t co2, nox, alcohol, benzene;
 
-void bme280_loop();  // From bme280.ino
-void oxygen_setup(); // From oxygen.ino
-void oxygen_loop();  // From oxygen.ino
+// Function prototypes
+void bme280_setup();
+void bme280_loop();
+void mq135_setup();
+void mq135_loop(float bme280_temp);
+bool buildPacket();
+void doDeepSleep(uint64_t msecToWake);
+void sleep();
+void callback(uint8_t message);
+void initDeepSleep();
 
 bool buildPacket() {
     int i = 0;
-    DEBUG_PORT.println("Building packet with BME280 and Oxygen data.");
+    DEBUG_PORT.println("Building 28-byte packet with BME280 and MQ-135 data.");
 
-    // BME280 data
     txBuffer[i++] = temperature >> 24;
     txBuffer[i++] = temperature >> 16;
     txBuffer[i++] = temperature >> 8;
@@ -37,13 +46,22 @@ bool buildPacket() {
     txBuffer[i++] = pressure >> 16;
     txBuffer[i++] = pressure >> 8;
     txBuffer[i++] = pressure;
-
-    // Oxygen data (DO in mg/L * 100)
-    uint32_t do_mgL = (uint32_t)(doValue * 100);
-    txBuffer[i++] = do_mgL >> 24;
-    txBuffer[i++] = do_mgL >> 16;
-    txBuffer[i++] = do_mgL >> 8;
-    txBuffer[i++] = do_mgL;
+    txBuffer[i++] = co2 >> 24;
+    txBuffer[i++] = co2 >> 16;
+    txBuffer[i++] = co2 >> 8;
+    txBuffer[i++] = co2;
+    txBuffer[i++] = nox >> 24;
+    txBuffer[i++] = nox >> 16;
+    txBuffer[i++] = nox >> 8;
+    txBuffer[i++] = nox;
+    txBuffer[i++] = benzene >> 24;
+    txBuffer[i++] = benzene >> 16;
+    txBuffer[i++] = benzene >> 8;
+    txBuffer[i++] = benzene;
+    txBuffer[i++] = alcohol >> 24;
+    txBuffer[i++] = alcohol >> 16;
+    txBuffer[i++] = alcohol >> 8;
+    txBuffer[i++] = alcohol;
 
     return true;
 }
@@ -52,33 +70,32 @@ bool trySend() {
     packetSent = false;
     packetQueued = true;
 
-    bme280_loop();  // Update BME280 readings
-    oxygen_loop();  // Update oxygen readings
+    bme280_loop();
+    float bme280_temp = temp_f; // Get BME280 temperature
+    delay(5000); // 5-second warm-up for MQ-135
+    mq135_loop(bme280_temp);
     if (!buildPacket()) {
         return false;
     }
 
     bool confirmed = (LORAWAN_CONFIRMED_EVERY > 0 && ttn_get_count() % LORAWAN_CONFIRMED_EVERY == 0);
     ttn_send(txBuffer, sizeof(txBuffer), LORAWAN_PORT, confirmed);
-    DEBUG_PORT.println("Sending packet...");
+    DEBUG_PORT.println("Sending 28-byte packet...");
+    Serial.flush();
     return true;
 }
 
 void doDeepSleep(uint64_t msecToWake) {
-    DEBUG_PORT.printf("Entering deep sleep for %llu seconds\n", msecToWake / 1000);
+    DEBUG_PORT.printf("Preparing to enter deep sleep for %llu milliseconds (%llu seconds)\n", msecToWake, msecToWake / 1000);
     LMIC_shutdown();
-    esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON);
-    uint64_t gpioMask = (1ULL << BUTTON_PIN);
-    gpio_pullup_en((gpio_num_t)BUTTON_PIN);
-    esp_sleep_enable_ext1_wakeup(gpioMask, ESP_EXT1_WAKEUP_ALL_LOW);
-    esp_sleep_enable_timer_wakeup(msecToWake * 1000ULL);
-    esp_deep_sleep_start();
+    Serial.flush();
+    sleep_millis(msecToWake);
 }
 
 void sleep() {
 #if SLEEP_BETWEEN_MESSAGES
-    uint32_t sleep_for = (millis() < SEND_INTERVAL) ? SEND_INTERVAL - millis() : SEND_INTERVAL;
-    doDeepSleep(sleep_for);
+    delay(MESSAGE_TO_SLEEP_DELAY);
+    doDeepSleep(SEND_INTERVAL);
 #endif
 }
 
@@ -86,7 +103,7 @@ void callback(uint8_t message) {
     if (EV_JOINED == message) DEBUG_PORT.println("Joined TTN!");
     else if (EV_JOINING == message) DEBUG_PORT.println("Joining TTN...");
     else if (EV_TXCOMPLETE == message && packetQueued) {
-        DEBUG_PORT.println("Message sent");
+        DEBUG_PORT.println("Packet sent successfully");
         packetQueued = false;
         packetSent = true;
     } else if (EV_PENDING == message) DEBUG_PORT.println("Message discarded");
@@ -96,29 +113,40 @@ void callback(uint8_t message) {
 void initDeepSleep() {
     bootCount++;
     wakeCause = esp_sleep_get_wakeup_cause();
+    uint32_t currentBootTime = millis();
+    if (lastBootTime > 0 && wakeCause == ESP_SLEEP_WAKEUP_TIMER) {
+        uint32_t timeSinceLastBoot = currentBootTime + SEND_INTERVAL; // Adjust for deep sleep duration
+        if (timeSinceLastBoot < 1000000) {
+            DEBUG_PORT.printf("Time since last boot: %u ms\n", timeSinceLastBoot);
+        } else {
+            DEBUG_PORT.println("Warning: Invalid time since last boot");
+        }
+    }
+    lastBootTime = currentBootTime;
     DEBUG_PORT.printf("Booted, wake cause %d (boot count %d)\n", wakeCause, bootCount);
+    DEBUG_PORT.printf("Boot time: %u ms\n", currentBootTime);
 }
 
 void setup() {
     Serial.begin(SERIAL_BAUD);
+    Serial.flush();
+    delay(500);
     while (!Serial);
-    delay(1000);
 
-    Serial.println("Initializing BME280...");
-    if (!bme.begin(0x77)) {  // Try 0x76 if this fails
-        Serial.println("BME280 not found! Check wiring.");
-        while (1);
-    }
-    Serial.println("BME280 OK!");
-
-    Serial.println("Initializing Oxygen sensor...");
-    oxygen_setup();
-    Serial.println("Oxygen sensor OK!");
-
-    initDeepSleep();
     pinMode(BUTTON_PIN, INPUT_PULLUP);
 
+    Serial.println("Initializing BME280...");
+    bme280_setup();
+    Serial.println("BME280 OK!");
+
+    Serial.println("Initializing MQ-135 sensor...");
+    mq135_setup();
+    Serial.println("MQ-135 sensor OK!");
+
+    initDeepSleep();
+
     DEBUG_MSG(APP_NAME " " APP_VERSION "\n");
+    DEBUG_MSG("SEND_INTERVAL: %lu ms\n", (unsigned long)SEND_INTERVAL);
     if (!ttn_setup()) {
         DEBUG_PORT.println("LoRa not found");
         if (REQUIRE_RADIO) sleep_forever();
@@ -138,7 +166,7 @@ void loop() {
     }
 
     static uint32_t last = 0;
-    if (millis() - last > SEND_INTERVAL) {
+    if (millis() - last >= SEND_INTERVAL) {
         if (trySend()) {
             last = millis();
             DEBUG_PORT.println("TRANSMITTED");
