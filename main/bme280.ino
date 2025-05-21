@@ -1,9 +1,10 @@
 #include <Wire.h>
 #include <Adafruit_BME280.h>
 
-#define LOCAL_ALTITUDE 35.0
-extern Adafruit_BME280 bme;
+#define LOCAL_ALTITUDE 7.0 // Antwerp altitude in meters
+Adafruit_BME280 bme;
 
+// Define BME280-related globals here
 float temp_f, hum_f, pres_f;
 uint32_t temperature, humidity, pressure;
 
@@ -28,7 +29,7 @@ void bme280_loop() {
 
     temperature = (uint32_t)(temp_f * 100);
     humidity = (uint32_t)(hum_f * 100);
-    pressure = (uint32_t)(pres_f * 100);
+    pressure = (uint32_t)(pres_f * 10); // 0.1 hPa resolution
 
     Serial.print("Temperature: ");
     Serial.print(temp_f);

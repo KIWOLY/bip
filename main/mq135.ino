@@ -4,7 +4,7 @@
 
 #define MQ135_PIN 36
 #define MQ135_TYPE "MQ-135"
-#define VOLTAGE_RESOLUTION 3.3
+#define VOLTAGE_RESOLUTION 5.0
 #define ADC_BIT_RESOLUTION 12
 #define RLOAD 5.0
 
@@ -22,11 +22,10 @@ MQUnifiedsensor MQ135("ESP-32", VOLTAGE_RESOLUTION, ADC_BIT_RESOLUTION, MQ135_PI
 float co2_ppm, nox_ppm, alcohol_ppm, benzene_ppm;
 uint32_t co2, nox, alcohol, benzene;
 RTC_DATA_ATTR float savedRatioCleanAir = 0.0;
-
-extern RTC_DATA_ATTR float savedR0;
+RTC_DATA_ATTR float savedR0 = 0.0;
 
 void mq135_setup() {
-    Serial.println("MQ-135 Calibration (RLOAD = 5.0 kOhm, 3.3V)");
+    Serial.println("MQ-135 Calibration (RLOAD = 5.0 kOhm, 5V with 10k/20k divider)");
     analogSetAttenuation(ADC_11db);
     MQ135.init();
     Serial.println("MQ-135 Initialized");
@@ -54,7 +53,7 @@ void mq135_setup() {
         Serial.println("Calibrating MQ-135 sensor...");
         float calcR0 = 0;
         float calcRs = 0;
-        const int max_samples = 60;
+        const int max_samples = 120; // Increased for stability
         for (int i = 1; i <= max_samples; i++) {
             MQ135.update();
             float voltage = 0;
@@ -64,7 +63,7 @@ void mq135_setup() {
                 sum += analogRead(MQ135_PIN);
                 delay(10);
             }
-            voltage = (sum / samples) * (VOLTAGE_RESOLUTION / 4095.0);
+            voltage = (sum / samples) * (VOLTAGE_RESOLUTION / 4095.0) * 1.5;
             float rs = ((VOLTAGE_RESOLUTION / voltage) - 1) * RLOAD;
             calcRs += rs;
             if (i % 5 == 0) {
@@ -81,7 +80,6 @@ void mq135_setup() {
         }
         calcRs /= max_samples;
 
-        // Calculate RATIO_MQ135_CLEAN_AIR for 415 ppm CO2
         float targetCO2 = 415.0;
         float rs_ro_ratio = pow(targetCO2 / CO2_A, 1.0 / CO2_B);
         savedRatioCleanAir = rs_ro_ratio;
@@ -108,10 +106,10 @@ void mq135_setup() {
                 sum += analogRead(MQ135_PIN);
                 delay(10);
             }
-            voltage = (sum / samples) * (VOLTAGE_RESOLUTION / 4095.0);
+            voltage = (sum / samples) * (VOLTAGE_RESOLUTION / 4095.0) * 1.5;
             float rs = ((VOLTAGE_RESOLUTION / voltage) - 1) * RLOAD;
             float rs_ro_ratio = rs / calcR0;
-            float temp_comp = 1.0; // Default during calibration
+            float temp_comp = 1.0;
             rs_ro_ratio /= temp_comp;
             float test_co2 = CO2_A * pow(rs_ro_ratio, CO2_B);
             test_co2_sum += test_co2;
@@ -126,8 +124,8 @@ void mq135_setup() {
         Serial.print("Saving R0: ");
         Serial.print(savedR0);
         Serial.println(" kOhm");
-        if (test_co2 < 300 || test_co2 > 500) {
-            Serial.println("Warning: CO2 reading out of expected clean air range (300–500 ppm). Recalibrate in fresh air.");
+        if (test_co2 < 300 || test_co2 > 800) {
+            Serial.println("Warning: CO2 reading out of expected clean air range (300–800 ppm). Recalibrate in fresh air.");
         } else {
             Serial.print("Calibration complete. Average R0: ");
             Serial.print(calcR0);
@@ -158,7 +156,7 @@ void mq135_loop(float bme280_temp) {
         delay(5);
         if (i == samples - 1) Serial.flush();
     }
-    voltage = (sum / samples) * (VOLTAGE_RESOLUTION / 4095.0);
+    voltage = (sum / samples) * (VOLTAGE_RESOLUTION / 4095.0) * 1.5;
 
     if (voltage < 0.01) {
         Serial.println("Error: Sensor voltage too low or disconnected");
@@ -192,8 +190,8 @@ void mq135_loop(float bme280_temp) {
     Serial.print("Alcohol (VOCs): "); Serial.print(alcohol_ppm); Serial.println(" ppm"); Serial.flush();
     Serial.print("Benzene: "); Serial.print(benzene_ppm); Serial.println(" ppm"); Serial.flush();
 
-    if (co2_ppm < 300 || co2_ppm > 500) {
-        Serial.println("Warning: Runtime CO2 reading out of expected clean air range (300–500 ppm). Consider recalibrating.");
+    if (co2_ppm < 300 || co2_ppm > 800) {
+        Serial.println("Warning: Runtime CO2 reading out of expected clean air range (300–800 ppm). ");
         Serial.flush();
     }
 }

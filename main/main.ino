@@ -3,21 +3,19 @@
 #include <Wire.h>
 #include <Adafruit_BME280.h>
 
-#define LOCAL_ALTITUDE 35.0
-Adafruit_BME280 bme;
+#define LOCAL_ALTITUDE 7.0 // Antwerp altitude in meters
+#define LAT 51.213583  // N 51.213583°
+#define LON 4.423684   // E 4.423684°
+
+// External BME280 object defined in bme280.ino
+extern Adafruit_BME280 bme;
 
 // Global variables
 RTC_DATA_ATTR int bootCount = 0;
-RTC_DATA_ATTR float savedR0 = 0;
 RTC_DATA_ATTR uint32_t lastBootTime = 0;
 esp_sleep_source_t wakeCause;
-static uint8_t txBuffer[28];
+static uint8_t txBuffer[20]; // 20 bytes for sensor data and coordinates
 bool packetSent = false, packetQueued = false;
-
-extern float temp_f, hum_f, pres_f;
-extern uint32_t temperature, humidity, pressure;
-extern float co2_ppm, nox_ppm, alcohol_ppm, benzene_ppm;
-extern uint32_t co2, nox, alcohol, benzene;
 
 // Function prototypes
 void bme280_setup();
@@ -32,36 +30,59 @@ void initDeepSleep();
 
 bool buildPacket() {
     int i = 0;
-    DEBUG_PORT.println("Building 28-byte packet with BME280 and MQ-135 data.");
+    DEBUG_PORT.println("Building 20-byte packet with BME280, MQ-135, and coordinates.");
 
-    txBuffer[i++] = temperature >> 24;
-    txBuffer[i++] = temperature >> 16;
-    txBuffer[i++] = temperature >> 8;
-    txBuffer[i++] = temperature;
-    txBuffer[i++] = humidity >> 24;
-    txBuffer[i++] = humidity >> 16;
-    txBuffer[i++] = humidity >> 8;
-    txBuffer[i++] = humidity;
-    txBuffer[i++] = pressure >> 24;
-    txBuffer[i++] = pressure >> 16;
-    txBuffer[i++] = pressure >> 8;
-    txBuffer[i++] = pressure;
-    txBuffer[i++] = co2 >> 24;
-    txBuffer[i++] = co2 >> 16;
-    txBuffer[i++] = co2 >> 8;
-    txBuffer[i++] = co2;
-    txBuffer[i++] = nox >> 24;
-    txBuffer[i++] = nox >> 16;
-    txBuffer[i++] = nox >> 8;
-    txBuffer[i++] = nox;
-    txBuffer[i++] = benzene >> 24;
-    txBuffer[i++] = benzene >> 16;
-    txBuffer[i++] = benzene >> 8;
-    txBuffer[i++] = benzene;
-    txBuffer[i++] = alcohol >> 24;
-    txBuffer[i++] = alcohol >> 16;
-    txBuffer[i++] = alcohol >> 8;
-    txBuffer[i++] = alcohol;
+    // Temperature (2 bytes, 0.01°C resolution)
+    int16_t temp_scaled = (int16_t)(temp_f * 100);
+    txBuffer[i++] = temp_scaled >> 8;
+    txBuffer[i++] = temp_scaled;
+
+    // Humidity (2 bytes, 0.01% resolution)
+    uint16_t hum_scaled = (uint16_t)(hum_f * 100);
+    txBuffer[i++] = hum_scaled >> 8;
+    txBuffer[i++] = hum_scaled;
+
+    // Pressure (2 bytes, 0.1 hPa resolution)
+    uint16_t pres_scaled = (uint16_t)(pres_f * 10);
+    txBuffer[i++] = pres_scaled >> 8;
+    txBuffer[i++] = pres_scaled;
+
+    // CO2 (2 bytes, 0.1 ppm resolution)
+    uint16_t co2_scaled = (uint16_t)(co2_ppm * 10);
+    txBuffer[i++] = co2_scaled >> 8;
+    txBuffer[i++] = co2_scaled;
+
+    // NOx (2 bytes, 0.001 ppm resolution)
+    uint16_t nox_scaled = (uint16_t)(nox_ppm * 1000);
+    txBuffer[i++] = nox_scaled >> 8;
+    txBuffer[i++] = nox_scaled;
+
+    // Alcohol (2 bytes, 0.01 ppm resolution)
+    uint16_t alcohol_scaled = (uint16_t)(alcohol_ppm * 100);
+    txBuffer[i++] = alcohol_scaled >> 8;
+    txBuffer[i++] = alcohol_scaled;
+
+    // Benzene (2 bytes, 0.001 ppm resolution)
+    uint16_t benzene_scaled = (uint16_t)(benzene_ppm * 1000);
+    txBuffer[i++] = benzene_scaled >> 8;
+    txBuffer[i++] = benzene_scaled;
+
+    // Latitude (2 bytes, 0.001° resolution)
+    int16_t lat_scaled = (int16_t)(LAT * 1000);
+    txBuffer[i++] = lat_scaled >> 8;
+    txBuffer[i++] = lat_scaled;
+
+    // Longitude (2 bytes, 0.001° resolution)
+    int16_t lon_scaled = (int16_t)(LON * 1000);
+    txBuffer[i++] = lon_scaled >> 8;
+    txBuffer[i++] = lon_scaled;
+
+    // Debug: Print packet bytes
+    DEBUG_PORT.print("Packet bytes: ");
+    for (int j = 0; j < sizeof(txBuffer); j++) {
+        DEBUG_PORT.printf("%02X ", txBuffer[j]);
+    }
+    DEBUG_PORT.println();
 
     return true;
 }
@@ -72,7 +93,7 @@ bool trySend() {
 
     bme280_loop();
     float bme280_temp = temp_f; // Get BME280 temperature
-    delay(5000); // 5-second warm-up for MQ-135
+    delay(30000); // 30-second warm-up for MQ-135
     mq135_loop(bme280_temp);
     if (!buildPacket()) {
         return false;
@@ -80,7 +101,7 @@ bool trySend() {
 
     bool confirmed = (LORAWAN_CONFIRMED_EVERY > 0 && ttn_get_count() % LORAWAN_CONFIRMED_EVERY == 0);
     ttn_send(txBuffer, sizeof(txBuffer), LORAWAN_PORT, confirmed);
-    DEBUG_PORT.println("Sending 28-byte packet...");
+    DEBUG_PORT.println("Sending 20-byte packet...");
     Serial.flush();
     return true;
 }
